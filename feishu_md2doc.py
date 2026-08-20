@@ -221,7 +221,7 @@ def main():
         clear_doc(doc,tok); print("已清空原内容")
     ns,nt,nq=write_md(doc,tok,md)
     print(f"✅ 写入完成: 普通块 {ns} / 表格 {nt} / 引用 {nq}")
-    print("文档: https://presence.feishu.cn/docx/"+doc)
+    print("文档: https://feishu.cn/docx/"+doc)
 
 if __name__=="__main__":
     main()

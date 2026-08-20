@@ -14,7 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 MD2DOC_PATH = os.path.expanduser("~/feishu_md2doc.py")
 CLAUDE_SETTINGS = os.path.expanduser("~/.claude/settings.json")
-FEISHU_DOC_BASE = "https://presence.feishu.cn/docx/"
+FEISHU_DOC_BASE = os.environ.get("FEISHU_DOC_BASE", "https://feishu.cn/docx/")
 ADDR, PORT = "127.0.0.1", 8801
 
 # ---- 载入 md2doc 模块(复用其 markdown→block 逻辑) ----------------------------
