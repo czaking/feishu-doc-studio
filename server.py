@@ -236,9 +236,10 @@ def anthropic_chat(m, system, messages, max_tokens=16000):
 def anthropic_messages(m, system, user, max_tokens=16000):
     return anthropic_chat(m, system, [{"role": "user", "content": user}], max_tokens)
 
-def model_stream(m, system, messages, max_tokens=16000):
+def model_stream(m, system, messages, max_tokens=16000, no_thinking=False):
     """流式调用,yield ("thinking"|"text", chunk)。
-    连接级失败在还没吐出任何内容时自动重试一次;端点不支持流式/Anthropic 协议时兜底。"""
+    连接级失败在还没吐出任何内容时自动重试一次;端点不支持流式/Anthropic 协议时兜底。
+    no_thinking:改稿这类任务关掉模型的扩展思考,避免思考吃光输出额度、正文为空。"""
     if not m["token"]:
         raise RuntimeError("没读到模型凭据。请确认 cc switch 已切好 provider。")
     url = model_url(m["baseUrl"], "anthropic")
@@ -250,6 +251,8 @@ def model_stream(m, system, messages, max_tokens=16000):
         headers["x-api-key"] = m["token"]
     body = {"model": clean_model(m["model"]), "max_tokens": max_tokens,
             "system": system, "messages": messages, "stream": True}
+    if no_thinking:
+        body["thinking"] = {"type": "disabled"}
     yielded = False
     for attempt in range(2):
         try:
@@ -510,36 +513,47 @@ def claims_change(reply):
     r = reply or ""
     return any(w in r for w in CLAIM_WORDS)
 
-def _collect_edit(model, msgs, on_chunk, max_tokens):
+def _collect_edit(model, msgs, on_chunk, max_tokens, no_thinking):
     full = ""
-    for kind, chunk in model_stream(model, EDIT_SYSTEM, msgs, max_tokens=max_tokens):
+    for kind, chunk in model_stream(model, EDIT_SYSTEM, msgs,
+                                    max_tokens=max_tokens, no_thinking=no_thinking):
         if kind == "text":
             full += chunk
         on_chunk(kind, chunk)
     return full
 
-def edit_with_retry(model, msgs, on_chunk, on_info):
-    """跑一轮;若模型声称改了却没给 doc_markdown,自动追问一轮要全文。
-    改稿要输出全文,默认 32k 上限;端点嫌大报 max_tokens 错时退回 16k。"""
+def _first_collect(model, msgs, on_chunk):
+    """改稿收集:默认关思考 + 32k;按报错形态降级(额度太大 / 不支持 thinking 参数 / 仍为空再试)。"""
     try:
-        full = _collect_edit(model, msgs, on_chunk, 32000)
+        return _collect_edit(model, msgs, on_chunk, 32000, no_thinking=True)
     except RuntimeError as e:
-        if "max_tokens" not in str(e):
-            raise
-        full = _collect_edit(model, msgs, on_chunk, 16000)
+        msg = str(e)
+        if "max_tokens" in msg:
+            return _collect_edit(model, msgs, on_chunk, 16000, no_thinking=True)
+        if "thinking" in msg:  # 端点不认 thinking 参数
+            return _collect_edit(model, msgs, on_chunk, 32000, no_thinking=False)
+        raise
+
+def edit_with_retry(model, msgs, on_chunk, on_info):
+    """跑一轮;若模型声称改了却没给 doc_markdown,自动追问一轮要全文。"""
+    full = _first_collect(model, msgs, on_chunk)
+    if not full.strip():
+        on_info("模型这一轮没产出正文(思考吃光了额度?),关思考重发一次…")
+        full = _first_collect(model, msgs + [
+            {"role": "user", "content": "请直接输出 JSON 结果,不要思考。"}], on_chunk)
     env = parse_envelope(full)
+    if not full.strip() or (not env.get("reply") and not env.get("doc_markdown") and not env.get("clarify")):
+        env = {"reply": "这轮模型没有产出有效内容(可能思考占用过多输出,或中转未返回正文)。"
+                        "请重发一次需求,或在右上角换个不带深度思考的模型再试。",
+               "clarify": None, "doc_markdown": None}
+        return env
     if env.get("doc_markdown") is None and not env.get("clarify") and claims_change(env.get("reply", "")):
         on_info("模型声称改了但没给改后全文,自动追问一次…")
         retry_msgs = msgs + [
             {"role": "assistant", "content": full},
             {"role": "user", "content": "你上一轮的回复缺少改后的完整文档。请重新输出 JSON,"
                                         "务必在 doc_markdown 字段给出修改后的完整 Markdown 全文。"}]
-        try:
-            full2 = _collect_edit(model, retry_msgs, on_chunk, 32000)
-        except RuntimeError as e:
-            if "max_tokens" not in str(e):
-                raise
-            full2 = _collect_edit(model, retry_msgs, on_chunk, 16000)
+        full2 = _first_collect(model, retry_msgs, on_chunk)
         env2 = parse_envelope(full2)
         if env2.get("doc_markdown"):
             env = env2
