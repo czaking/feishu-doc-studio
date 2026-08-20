@@ -202,8 +202,25 @@ def append_table(doc,tok,cells):
     if r.get("code")!=0: sys.exit("建表失败: "+json.dumps(r,ensure_ascii=False))
     time.sleep(0.3)
 
+def normalize_fences(md):
+    """有的模型用单/双反引号当代码块围栏(`bash … `),统一成三反引号。"""
+    lines=md.split("\n"); out=[]; i=0
+    while i<len(lines):
+        m=re.match(r"^(`{1,2})\s*([\w+#.\-]*)\s*$",lines[i])
+        if m:
+            j=i+1
+            while j<len(lines) and not re.match(r"^`{1,3}\s*$",lines[j]):
+                j+=1
+            if j<len(lines):  # 找到收尾围栏,整段改写成 ```
+                out.append("```"+m.group(2))
+                out.extend(lines[i+1:j])
+                out.append("```")
+                i=j+1; continue
+        out.append(lines[i]); i+=1
+    return "\n".join(out)
+
 def write_md(doc,tok,md):
-    ops=parse(md); batch=[]; n_simple=n_tbl=n_q=0
+    ops=parse(normalize_fences(md)); batch=[]; n_simple=n_tbl=n_q=0
     for op in ops:
         if op[0]=="table":
             append_children(doc,tok,batch); n_simple+=len(batch); batch=[]

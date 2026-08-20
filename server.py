@@ -63,7 +63,11 @@ def public_config(cfg):
         if v and v not in seen_cur:
             seen_cur.add(v)
             cands.append({"model": v, "provider": ""})  # provider 空 = 跟随当前
+    # 与「当前」端点相同的 provider 不再重复列(上面「跟随当前」已覆盖)
+    cur_base = (env.get("ANTHROPIC_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", "")).rstrip("/")
     for p in cc_providers():
+        if p["baseUrl"].rstrip("/") == cur_base:
+            continue
         for mm in p["models"]:
             cands.append({"model": mm, "provider": p["name"]})
     return {"bots": [bot(b) for b in cfg.get("bots", [])],
@@ -232,6 +236,66 @@ def anthropic_chat(m, system, messages, max_tokens=16000):
 def anthropic_messages(m, system, user, max_tokens=16000):
     return anthropic_chat(m, system, [{"role": "user", "content": user}], max_tokens)
 
+def model_stream(m, system, messages, max_tokens=16000):
+    """流式调用,yield ("thinking"|"text", chunk)。
+    连接级失败在还没吐出任何内容时自动重试一次;端点不支持流式/Anthropic 协议时兜底。"""
+    if not m["token"]:
+        raise RuntimeError("没读到模型凭据。请确认 cc switch 已切好 provider。")
+    url = model_url(m["baseUrl"], "anthropic")
+    headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01",
+               "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+    if m["authKind"] == "bearer":
+        headers["Authorization"] = "Bearer " + m["token"]
+    else:
+        headers["x-api-key"] = m["token"]
+    body = {"model": clean_model(m["model"]), "max_tokens": max_tokens,
+            "system": system, "messages": messages, "stream": True}
+    yielded = False
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
+            resp = urllib.request.urlopen(req, timeout=600)
+            ctype = resp.headers.get("Content-Type", "")
+            if "text/event-stream" not in ctype:
+                # 端点忽略了 stream 参数,按普通 JSON 响应处理
+                r = json.load(resp)
+                txt = "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
+                if not txt:  # 可能是 OpenAI 格式
+                    txt = (r.get("choices") or [{}])[0].get("message", {}).get("content", "")
+                yield ("text", txt)
+                return
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    ev = json.loads(data)
+                except Exception:
+                    continue
+                t = ev.get("type")
+                if t == "content_block_delta":
+                    d = ev.get("delta", {}) or {}
+                    if d.get("type") == "text_delta" and d.get("text"):
+                        yield ("text", d["text"]); yielded = True
+                    elif d.get("type") == "thinking_delta" and d.get("thinking"):
+                        yield ("thinking", d["thinking"]); yielded = True
+                elif t == "error":
+                    raise RuntimeError("模型返回错误: " + json.dumps(ev, ensure_ascii=False)[:300])
+            return
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode()[:300]
+            if e.code in (404, 405):  # 纯 OpenAI 兼容端点:退回非流式
+                yield ("text", openai_chat(m, system, messages, max_tokens))
+                return
+            raise RuntimeError(f"模型 {m['model']} 返回 {e.code}: {detail}")
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+            if yielded or attempt == 1:
+                raise RuntimeError(f"模型连接中断({m['model']}): {e}")
+            time.sleep(1)
+
 OPTIMIZE_SYSTEM = (
     "你是资深中文技术文档编辑。请优化用户给的 Markdown:改善结构层次、措辞与可读性,"
     "补全过渡,修正明显笔误,保持技术事实不变。输出必须是可直接写入飞书的 Markdown,"
@@ -388,6 +452,7 @@ EDIT_SYSTEM = (
     "只用飞书支持的语法:# ## ### #### 标题、段落、**加粗**、`行内代码`、- 无序列表、1. 有序列表、"
     "> 引用、表格、--- 分割线、``` 代码块(保留语言标签)。\n"
     "处理代码块务必保持 ``` 围栏成对完整,除需求涉及的改动外代码内容逐字保留,不要把代码拆成普通段落。"
+    "代码块围栏必须用三个反引号 ```(第一行 ```语言名),严禁用单个或两个反引号当围栏。"
     "保持与原文一致的技术事实,不要杜撰。")
 
 def parse_envelope(text):
@@ -404,8 +469,7 @@ def parse_envelope(text):
                 pass
     return {"reply": t, "clarify": None, "doc_markdown": None}
 
-def doc_chat(doc_markdown, history, message, model_name=None, provider_name=None):
-    model = active_model(model_name, provider_name)
+def build_edit_messages(doc_markdown, history, message):
     msgs = []
     convo = f"【当前文档全文 Markdown】\n{doc_markdown or '(空文档,还没有内容)'}\n"
     msgs.append({"role": "user", "content": convo + "\n请等待我的修改需求。"})
@@ -414,8 +478,11 @@ def doc_chat(doc_markdown, history, message, model_name=None, provider_name=None
         role = "assistant" if h.get("role") == "assistant" else "user"
         msgs.append({"role": role, "content": h.get("content", "")})
     msgs.append({"role": "user", "content": message})
-    # active_model 走 Anthropic:把 system + 多轮 messages 一起发
-    out = anthropic_chat(model, EDIT_SYSTEM, msgs)
+    return msgs
+
+def doc_chat(doc_markdown, history, message, model_name=None, provider_name=None):
+    model = active_model(model_name, provider_name)
+    out = anthropic_chat(model, EDIT_SYSTEM, build_edit_messages(doc_markdown, history, message))
     return parse_envelope(out)
 
 # ---- HTTP ------------------------------------------------------------------
@@ -431,6 +498,17 @@ class Handler(BaseHTTPRequestHandler):
     def _read_json(self):
         n = int(self.headers.get("Content-Length", 0))
         return json.loads(self.rfile.read(n) or b"{}")
+
+    def _sse_start(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+    def _sse(self, obj):
+        self.wfile.write(b"data: " + json.dumps(obj, ensure_ascii=False).encode() + b"\n\n")
+        self.wfile.flush()
 
     def log_message(self, *a):
         pass  # 静默
@@ -492,6 +570,43 @@ class Handler(BaseHTTPRequestHandler):
                 d = self._read_json()
                 env = doc_chat(d.get("markdown", ""), d.get("history", []), d["message"], d.get("model"), d.get("provider"))
                 return self._send(200, env)
+
+            if self.path == "/api/doc/chat/stream":
+                d = self._read_json()
+                model = active_model(d.get("model"), d.get("provider"))
+                msgs = build_edit_messages(d.get("markdown", ""), d.get("history", []), d["message"])
+                self._sse_start()
+                full = ""
+                try:
+                    for kind, chunk in model_stream(model, EDIT_SYSTEM, msgs):
+                        if kind == "text":
+                            full += chunk
+                        self._sse({"kind": kind, "text": chunk})
+                    self._sse({"kind": "done", "env": parse_envelope(full)})
+                except Exception as e:
+                    traceback.print_exc()
+                    self._sse({"kind": "error", "error": str(e)})
+                return
+
+            if self.path == "/api/optimize/stream":
+                d = self._read_json()
+                model = active_model(d.get("model"), d.get("provider"))
+                instruction = (d.get("instruction") or "").strip()
+                user_msg = (("额外要求:" + instruction + "\n\n") if instruction else "") + \
+                           "下面是待优化的 Markdown:\n\n" + d["markdown"]
+                self._sse_start()
+                full = ""
+                try:
+                    for kind, chunk in model_stream(model, OPTIMIZE_SYSTEM,
+                                                    [{"role": "user", "content": user_msg}]):
+                        if kind == "text":
+                            full += chunk
+                        self._sse({"kind": kind, "text": chunk})
+                    self._sse({"kind": "done", "markdown": strip_fence(full)})
+                except Exception as e:
+                    traceback.print_exc()
+                    self._sse({"kind": "error", "error": str(e)})
+                return
 
             if self.path == "/api/doc/apply":
                 d = self._read_json()
