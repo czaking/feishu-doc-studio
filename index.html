@@ -93,6 +93,12 @@
   @media (prefers-color-scheme: dark){ .msg.err{ background:#3a1d21; } }
   .msg a, .bubble a { color:var(--accent); font-weight:600; }
   .thinktail { margin-top:6px; color:var(--dim); font-size:12px; line-height:1.55; white-space:pre-wrap; word-break:break-word; }
+  .imgprev { display:flex; gap:7px; flex-wrap:wrap; margin:8px 0 0; }
+  .imgprev:empty { display:none; }
+  .thumb { position:relative; display:inline-block; }
+  .thumb img { width:48px; height:48px; object-fit:cover; border-radius:8px; border:1px solid var(--border); }
+  .thumb button { position:absolute; top:-7px; right:-7px; width:17px; height:17px; padding:0; font-size:10px;
+                  border-radius:50%; line-height:1; background:var(--panel); }
   .dim { color:var(--dim); } code { background:var(--accent-soft); padding:1px 5px; border-radius:5px; font-size:12.5px; }
   .spin { display:inline-block; width:13px; height:13px; border:2px solid var(--dim); border-top-color:transparent;
           border-radius:50%; animation:sp .7s linear infinite; vertical-align:-2px; }
@@ -180,8 +186,10 @@
       <div class="field"><label>飞书 Bot</label><select id="botSel"></select></div>
       <div class="field" style="flex:1; min-width:260px;"><label>优化要求(可选)</label>
         <input id="instruction" placeholder="例:更正式的语气 / 补一段背景 / 精简重复"></div>
+      <button class="ghost" onclick="pickFiles('create')" title="附加图片(选文件或直接粘贴截图)">📎</button>
       <button class="primary" id="optBtn" onclick="optimize()">✨ 用模型优化</button>
     </div>
+    <div id="imgPrevCreate" class="imgprev"></div>
     <div id="msg" class="msg"></div>
     <div class="cols">
       <div class="pane">
@@ -228,8 +236,10 @@
       <div class="pane">
         <h3>💬 和模型说要怎么改</h3>
         <div class="chat" id="chat"></div>
+        <div id="imgPrevChat" class="imgprev" style="padding:0 12px;"></div>
         <div class="chatbox">
-          <textarea id="chatIn" placeholder="载入文档后,在这说需求。例:第二段太啰嗦,精简一半" onkeydown="chatKey(event)" disabled></textarea>
+          <button class="ghost" onclick="pickFiles('chat')" title="附加图片(选文件或直接粘贴截图)" id="attachChat" disabled>📎</button>
+          <textarea id="chatIn" placeholder="载入文档后,在这说需求。例:第二段太啰嗦,精简一半;可粘贴截图" onkeydown="chatKey(event)" disabled></textarea>
           <button class="primary" id="sendBtn" onclick="sendChat()" disabled>发送</button>
         </div>
       </div>
@@ -282,6 +292,37 @@ async function jpost(u, body){
   const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status); return d;
 }
+/* ---- 图片附件(选文件 / 粘贴截图),随消息发给模型 ---- */
+const IMGS = {create: [], chat: []};
+function pickFiles(which){
+  const inp = document.createElement('input');
+  inp.type='file'; inp.accept='image/*'; inp.multiple=true;
+  inp.onchange = ()=> [...inp.files].forEach(f=>addImage(which,f));
+  inp.click();
+}
+function addImage(which, file){
+  if(!file.type.startsWith('image/')) return;
+  if(file.size > 6*1024*1024){ alert('图片太大(>6MB),请压缩后再附加'); return; }
+  const r = new FileReader();
+  r.onload = ()=>{ IMGS[which].push({mime:file.type, b64:r.result.split(',')[1]}); renderImgPrev(which); };
+  r.readAsDataURL(file);
+}
+function rmImage(which,i){ IMGS[which].splice(i,1); renderImgPrev(which); }
+function renderImgPrev(which){
+  const el = which==='chat' ? $('imgPrevChat') : $('imgPrevCreate');
+  el.innerHTML = IMGS[which].map((im,i)=>
+    `<span class="thumb"><img src="data:${im.mime};base64,${im.b64}"><button onclick="rmImage('${which}',${i})">✕</button></span>`).join('');
+}
+function takeImages(which){ const a = IMGS[which].slice(); IMGS[which].length = 0; renderImgPrev(which); return a; }
+function bindPaste(elId, which){
+  const el = $(elId); if(!el) return;
+  el.addEventListener('paste', e=>{
+    const fs = [...((e.clipboardData||{}).files||[])].filter(f=>f.type.startsWith('image/'));
+    if(fs.length){ e.preventDefault(); fs.forEach(f=>addImage(which,f)); }
+  });
+}
+bindPaste('chatIn','chat'); bindPaste('src','create'); bindPaste('instruction','create');
+
 /* SSE 流式读取:每帧 {kind:"thinking"|"text"|"done"|"error", ...} */
 async function streamPost(u, body, onFrame){
   const resp = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -398,7 +439,7 @@ async function optimize(){
   msg($('msg'),'<span class="spin"></span> 模型处理中… <span class="dim" id="optProg"></span>','ok');
   try {
     let md=null, err=null, n=0;
-    await streamPost('/api/optimize/stream',{markdown:s, instruction:$('instruction').value, model:selectedModel(), provider:selectedProvider()},
+    await streamPost('/api/optimize/stream',{markdown:s, instruction:$('instruction').value, model:selectedModel(), provider:selectedProvider(), images:takeImages('create')},
       (f)=>{
         if(f.kind==='text'){ n+=f.text.length; const p=$('optProg'); if(p) p.textContent='已生成 '+n+' 字'; }
         else if(f.kind==='done'){ md=f.markdown; }
@@ -449,7 +490,7 @@ async function loadDoc(){
     $('openDoc').href = d.url; $('openDoc').style.display='';
     renderDoc(); $('chat').innerHTML='';
     addBot_bubble(d.empty ? '这篇文档是空的。告诉我你想写什么,我来起草。' : '已读完全文。想怎么改?直接说需求就行,拿不准的我会先问你。');
-    $('chatIn').disabled=false; $('sendBtn').disabled=false; $('chatIn').focus();
+    $('chatIn').disabled=false; $('sendBtn').disabled=false; $('attachChat').disabled=false; $('chatIn').focus();
     hide($('msg2'));
   } catch(e){ msg($('msg2'),'载入失败:'+e.message,'err'); } finally { btn.disabled=false; btn.textContent=old; }
 }
@@ -485,7 +526,7 @@ async function sendChat(text){
     let env=null, err=null, nchars=0, think='';
     const tail = wait.querySelector('.thinktail');
     await streamPost('/api/doc/chat/stream',
-      {markdown:ED.cur, history:ED.history.slice(0,-1), message, model:selectedModel(), provider:selectedProvider()},
+      {markdown:ED.cur, history:ED.history.slice(0,-1), message, model:selectedModel(), provider:selectedProvider(), images:takeImages('chat')},
       (f)=>{
         if(f.kind==='thinking'){ think+=f.text; tail.textContent='💭 '+think.slice(-300); }
         else if(f.kind==='text'){ nchars+=f.text.length; if(!think) tail.textContent='正在生成… '+nchars+' 字'; }

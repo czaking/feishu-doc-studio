@@ -219,15 +219,23 @@ def normalize_fences(md):
         out.append(lines[i]); i+=1
     return "\n".join(out)
 
+SPACER={"block_type":2,"text":{"elements":[{"text_run":{"content":""}}]}}  # 空段落,给表格等块级元素留呼吸间距
+
 def write_md(doc,tok,md):
-    ops=parse(normalize_fences(md)); batch=[]; n_simple=n_tbl=n_q=0
+    ops=parse(normalize_fences(md)); batch=[]; n_simple=n_tbl=n_q=0; written=False
     for op in ops:
         if op[0]=="table":
+            has_prev=bool(batch) or written
             append_children(doc,tok,batch); n_simple+=len(batch); batch=[]
+            if has_prev:  # 表格前留一行空,避免贴着上文
+                append_children(doc,tok,[SPACER]); n_simple+=1
             append_table(doc,tok,op[1]); n_tbl+=1
+            append_children(doc,tok,[SPACER]); n_simple+=1  # 表格后也留一行
+            written=True
         elif op[0]=="quote":
             append_children(doc,tok,batch); n_simple+=len(batch); batch=[]
             append_quote(doc,tok,op[1]); n_q+=1
+            written=True
         else:
             b=simple_block(op)
             if b: batch.append(b)

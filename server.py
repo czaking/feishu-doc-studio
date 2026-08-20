@@ -203,8 +203,10 @@ def openai_chat(m, system, messages, max_tokens=16000):
     headers = {"Content-Type": "application/json"}
     if m["token"]:
         headers["Authorization"] = "Bearer " + m["token"]
+    converted = [{"role": "system", "content": system}] + \
+                [{**msg, "content": _to_openai_content(msg["content"])} for msg in messages]
     r = _post_json(url, headers, {"model": clean_model(m["model"]), "max_tokens": max_tokens,
-                                  "messages": [{"role": "system", "content": system}] + messages})
+                                  "messages": converted})
     return r["choices"][0]["message"]["content"]
 
 def anthropic_chat(m, system, messages, max_tokens=16000):
@@ -465,6 +467,8 @@ EDIT_SYSTEM = (
     "> 引用、表格、--- 分割线、``` 代码块(保留语言标签)。\n"
     "处理代码块务必保持 ``` 围栏成对完整,除需求涉及的改动外代码内容逐字保留,不要把代码拆成普通段落。"
     "代码块围栏必须用三个反引号 ```(第一行 ```语言名),严禁用单个或两个反引号当围栏。"
+    "用户可能附带图片(截图/架构图等):若需求引用了图片,把图中信息转化为文档内容"
+    "(文字/列表/表格/代码块),不要把图片本身写进文档。"
     "保持与原文一致的技术事实,不要杜撰。")
 
 def _unescape_json_string(s):
@@ -561,7 +565,37 @@ def edit_with_retry(model, msgs, on_chunk, on_info):
             env["reply"] = (env.get("reply") or "") + "\n" + env2["reply"]
     return env
 
-def build_edit_messages(doc_markdown, history, message):
+ALLOWED_IMG_MIME = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+
+def _clean_images(images):
+    return [im for im in (images or [])
+            if im.get("b64") and im.get("mime") in ALLOWED_IMG_MIME][:6]
+
+def user_content(text, images=None):
+    """用户消息:可带图片(Anthropic base64 image block)。"""
+    imgs = _clean_images(images)
+    if not imgs:
+        return text
+    parts = [{"type": "image", "source": {"type": "base64",
+                                          "media_type": im["mime"], "data": im["b64"]}} for im in imgs]
+    parts.append({"type": "text", "text": text})
+    return parts
+
+def _to_openai_content(content):
+    """Anthropic 多模态 content → OpenAI chat/completions 格式(回退协议用)。"""
+    if isinstance(content, str):
+        return content
+    out = []
+    for p in content:
+        if p.get("type") == "text":
+            out.append({"type": "text", "text": p.get("text", "")})
+        elif p.get("type") == "image":
+            src = p.get("source", {})
+            out.append({"type": "image_url", "image_url": {
+                "url": f"data:{src.get('media_type')};base64,{src.get('data')}"}})
+    return out or content
+
+def build_edit_messages(doc_markdown, history, message, images=None):
     msgs = []
     convo = f"【当前文档全文 Markdown】\n{doc_markdown or '(空文档,还没有内容)'}\n"
     msgs.append({"role": "user", "content": convo + "\n请等待我的修改需求。"})
@@ -569,12 +603,12 @@ def build_edit_messages(doc_markdown, history, message):
     for h in (history or []):
         role = "assistant" if h.get("role") == "assistant" else "user"
         msgs.append({"role": role, "content": h.get("content", "")})
-    msgs.append({"role": "user", "content": message})
+    msgs.append({"role": "user", "content": user_content(message, images)})
     return msgs
 
-def doc_chat(doc_markdown, history, message, model_name=None, provider_name=None):
+def doc_chat(doc_markdown, history, message, model_name=None, provider_name=None, images=None):
     model = active_model(model_name, provider_name)
-    msgs = build_edit_messages(doc_markdown, history, message)
+    msgs = build_edit_messages(doc_markdown, history, message, images)
     return edit_with_retry(model, msgs, on_chunk=lambda k, c: None, on_info=lambda t: None)
 
 # ---- HTTP ------------------------------------------------------------------
@@ -633,7 +667,7 @@ class Handler(BaseHTTPRequestHandler):
                 instruction = (d.get("instruction") or "").strip()
                 user_msg = (("额外要求:" + instruction + "\n\n") if instruction else "") + \
                            "下面是待优化的 Markdown:\n\n" + d["markdown"]
-                out = anthropic_messages(model, OPTIMIZE_SYSTEM, user_msg)
+                out = anthropic_messages(model, OPTIMIZE_SYSTEM, user_content(user_msg, d.get("images")))
                 return self._send(200, {"markdown": strip_fence(out)})
 
             if self.path == "/api/publish":
@@ -660,13 +694,13 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/api/doc/chat":
                 d = self._read_json()
-                env = doc_chat(d.get("markdown", ""), d.get("history", []), d["message"], d.get("model"), d.get("provider"))
+                env = doc_chat(d.get("markdown", ""), d.get("history", []), d["message"], d.get("model"), d.get("provider"), d.get("images"))
                 return self._send(200, env)
 
             if self.path == "/api/doc/chat/stream":
                 d = self._read_json()
                 model = active_model(d.get("model"), d.get("provider"))
-                msgs = build_edit_messages(d.get("markdown", ""), d.get("history", []), d["message"])
+                msgs = build_edit_messages(d.get("markdown", ""), d.get("history", []), d["message"], d.get("images"))
                 self._sse_start()
                 try:
                     env = edit_with_retry(model, msgs,
@@ -684,11 +718,11 @@ class Handler(BaseHTTPRequestHandler):
                 instruction = (d.get("instruction") or "").strip()
                 user_msg = (("额外要求:" + instruction + "\n\n") if instruction else "") + \
                            "下面是待优化的 Markdown:\n\n" + d["markdown"]
+                opt_msgs = [{"role": "user", "content": user_content(user_msg, d.get("images"))}]
                 self._sse_start()
                 full = ""
                 try:
-                    for kind, chunk in model_stream(model, OPTIMIZE_SYSTEM,
-                                                    [{"role": "user", "content": user_msg}]):
+                    for kind, chunk in model_stream(model, OPTIMIZE_SYSTEM, opt_msgs):
                         if kind == "text":
                             full += chunk
                         self._sse({"kind": kind, "text": chunk})
