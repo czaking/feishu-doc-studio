@@ -1,0 +1,11 @@
+# 本机运行时产物 / 密钥,切勿提交
+config.json
+run.log
+*.log
+__pycache__/
+*.pyc
+.DS_Store
+
+# 飞书用户 token(若放到本目录也忽略)
+*feishu_user_token*.json
+.feishu.env

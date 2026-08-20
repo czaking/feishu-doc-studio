@@ -1,0 +1,12 @@
+{
+  "bots": [
+    {
+      "id": "示例-换成任意唯一串",
+      "name": "我的飞书应用",
+      "appId": "cli_xxxxxxxxxxxxxxxx",
+      "appSecret": "",
+      "identity": "user",
+      "userTokenFile": ""
+    }
+  ]
+}

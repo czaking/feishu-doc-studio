@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>飞书文档工作台</title>
+<style>
+  :root {
+    --bg:#f4f6fb; --panel:#ffffff; --panel2:#fafbff; --border:#e5e9f2; --text:#1b2330; --dim:#7a869a;
+    --accent:#5b6cff; --accent2:#9b6bff; --accent-soft:#eef1ff; --ok:#12a150; --err:#e5484d; --warn:#c08a00;
+    --grad:linear-gradient(120deg,#5b6cff,#9b6bff 55%,#e069c9);
+    --shadow:0 6px 24px rgba(40,50,90,.08); --shadow2:0 2px 8px rgba(40,50,90,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0c0f16; --panel:#141926; --panel2:#111624; --border:#242c3d; --text:#e2e7f0; --dim:#8792a6;
+            --accent:#7d8bff; --accent2:#b48bff; --accent-soft:#1b2138; --ok:#3fce7d; --err:#f26d72; --warn:#e0b155;
+            --grad:linear-gradient(120deg,#6474ff,#a074ff 55%,#e07ad0);
+            --shadow:0 8px 30px rgba(0,0,0,.4); --shadow2:0 2px 10px rgba(0,0,0,.3); }
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:var(--bg); color:var(--text); font-size:14px; }
+  ::-webkit-scrollbar{ width:10px; height:10px; } ::-webkit-scrollbar-thumb{ background:var(--border); border-radius:6px; }
+
+  header { display:flex; align-items:center; gap:14px; padding:12px 22px; background:var(--panel);
+           border-bottom:1px solid var(--border); position:sticky; top:0; z-index:20; box-shadow:var(--shadow2); }
+  .brand { font-size:16px; font-weight:700; display:flex; align-items:center; gap:8px; }
+  .brand .dot { width:22px; height:22px; border-radius:7px; background:var(--grad); display:inline-block; }
+  .tabs { display:flex; gap:4px; background:var(--panel2); border:1px solid var(--border); border-radius:10px; padding:3px; }
+  .tabs button { border:none; background:none; color:var(--dim); padding:7px 16px; border-radius:8px; font-size:13.5px;
+                 font-weight:600; cursor:pointer; transition:.15s; }
+  .tabs button.on { background:var(--grad); color:#fff; box-shadow:0 3px 10px rgba(91,108,255,.35); }
+  header .sp { margin-left:auto; }
+  .chip { display:inline-flex; align-items:center; gap:6px; padding:7px 12px; border:1px solid var(--border);
+          border-radius:8px; background:var(--accent-soft); font-size:13px; min-height:35px; }
+  .chip.off { background:#ffeef0; color:var(--err); }
+  @media (prefers-color-scheme: dark){ .chip.off{ background:#3a1d21; } }
+
+  button { font-size:14px; cursor:pointer; border-radius:9px; border:1px solid var(--border);
+           background:var(--panel); color:var(--text); padding:8px 15px; transition:.15s; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--grad); border:none; color:#fff; font-weight:600; box-shadow:0 3px 12px rgba(91,108,255,.3); }
+  button.primary:hover { filter:brightness(1.06); }
+  button.ghost { background:none; }
+  button:disabled { opacity:.5; cursor:default; filter:none; }
+
+  main { max-width:1320px; margin:0 auto; padding:20px 22px 40px; }
+  .view { display:none; } .view.on { display:block; animation:fade .2s; }
+  @keyframes fade { from{ opacity:0; transform:translateY(4px);} to{ opacity:1; } }
+
+  .bar { display:flex; flex-wrap:wrap; gap:14px; align-items:end; margin-bottom:16px; }
+  .field { display:flex; flex-direction:column; gap:5px; }
+  .field label { font-size:12px; color:var(--dim); font-weight:600; }
+  select, input, textarea { background:var(--panel); color:var(--text); border:1px solid var(--border);
+           border-radius:9px; padding:8px 11px; font-size:14px; font-family:inherit; transition:.15s; }
+  select:focus, input:focus, textarea:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+  select, .field input { min-width:190px; }
+
+  .cols { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .pane { background:var(--panel); border:1px solid var(--border); border-radius:14px; display:flex; flex-direction:column;
+          box-shadow:var(--shadow); overflow:hidden; }
+  .pane h3 { margin:0; font-size:13px; font-weight:600; padding:11px 14px; border-bottom:1px solid var(--border);
+             color:var(--dim); display:flex; align-items:center; gap:8px; background:var(--panel2); }
+  textarea.editor { flex:1; min-height:440px; border:none; resize:vertical; padding:14px;
+             font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; line-height:1.7; background:var(--panel); color:var(--text); }
+  textarea.editor:focus { outline:none; box-shadow:none; }
+
+  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:end; margin:16px 0 0; padding:16px;
+         background:var(--panel); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); }
+  .msg { padding:9px 13px; border-radius:9px; margin:12px 0; display:none; font-size:13.5px; }
+  .msg.show { display:block; } .msg.ok { background:var(--accent-soft); color:var(--ok); }
+  .msg.err { background:#ffeef0; color:var(--err); }
+  @media (prefers-color-scheme: dark){ .msg.err{ background:#3a1d21; } }
+  .msg a, .bubble a { color:var(--accent); font-weight:600; }
+  .dim { color:var(--dim); } code { background:var(--accent-soft); padding:1px 5px; border-radius:5px; font-size:12.5px; }
+  .spin { display:inline-block; width:13px; height:13px; border:2px solid var(--dim); border-top-color:transparent;
+          border-radius:50%; animation:sp .7s linear infinite; vertical-align:-2px; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+
+  /* ---- 对话改稿 ---- */
+  #editView .cols { grid-template-columns:1.1fr .9fr; height:calc(100vh - 210px); min-height:480px; }
+  .docview { flex:1; overflow:auto; padding:20px 24px; line-height:1.75; }
+  .docview.proposed { box-shadow:inset 4px 0 0 var(--accent); }
+  .docview h1,.docview h2,.docview h3,.docview h4 { margin:.8em 0 .4em; line-height:1.3; }
+  .docview h1{ font-size:22px; } .docview h2{ font-size:18px; } .docview h3{ font-size:16px; } .docview h4{ font-size:14px; }
+  .docview p { margin:.5em 0; } .docview ul,.docview ol { margin:.4em 0; padding-left:1.4em; }
+  .docview li { margin:.2em 0; } .docview hr { border:none; border-top:1px solid var(--border); margin:1em 0; }
+  .docview blockquote { margin:.6em 0; padding:8px 14px; border-left:3px solid var(--accent); background:var(--accent-soft); border-radius:0 8px 8px 0; }
+  .docview table { border-collapse:collapse; margin:.6em 0; width:100%; } .docview th,.docview td{ border:1px solid var(--border); padding:6px 10px; text-align:left; }
+  .docview th { background:var(--panel2); }
+  .empty-doc { color:var(--dim); text-align:center; margin-top:80px; }
+
+  .chat { flex:1; overflow:auto; padding:16px; display:flex; flex-direction:column; gap:12px; }
+  .bubble { max-width:88%; padding:10px 13px; border-radius:13px; font-size:13.5px; line-height:1.6; white-space:pre-wrap; word-break:break-word; }
+  .bubble.user { align-self:flex-end; background:var(--grad); color:#fff; border-bottom-right-radius:4px; }
+  .bubble.bot { align-self:flex-start; background:var(--panel2); border:1px solid var(--border); border-bottom-left-radius:4px; }
+  .editcard { align-self:flex-start; max-width:92%; border:1px solid var(--accent); border-radius:13px; overflow:hidden; background:var(--panel); }
+  .editcard .hd { padding:8px 12px; background:var(--accent-soft); font-size:12.5px; font-weight:600; display:flex; align-items:center; gap:6px; }
+  .editcard .bd { padding:10px 12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .editcard .bd .dim { flex:1; min-width:120px; }
+  .chatbox { border-top:1px solid var(--border); padding:12px; display:flex; gap:8px; background:var(--panel2); }
+  .chatbox textarea { flex:1; resize:none; min-height:44px; max-height:140px; }
+
+  /* ---- 抽屉 / 弹窗 ---- */
+  .mask { position:fixed; inset:0; background:rgba(10,14,25,.5); backdrop-filter:blur(2px); display:none; z-index:60; }
+  .mask.show { display:block; animation:fade .15s; }
+  .drawer { position:fixed; top:0; right:0; width:min(560px,96vw); height:100%; background:var(--panel);
+            border-left:1px solid var(--border); z-index:70; transform:translateX(100%); transition:transform .2s;
+            display:flex; flex-direction:column; box-shadow:var(--shadow); }
+  .drawer.show { transform:none; }
+  .drawer .hd { padding:15px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; }
+  .drawer .hd h2 { font-size:15px; margin:0; }
+  .drawer .body { overflow:auto; padding:20px; flex:1; }
+  .card { border:1px solid var(--border); border-radius:12px; padding:14px; margin-bottom:12px; background:var(--panel2); }
+  .card .grid { display:grid; grid-template-columns:110px 1fr; gap:9px 10px; align-items:center; }
+  .card input, .card select { width:100%; min-width:0; }
+  .card .del { color:var(--err); border-color:transparent; background:none; padding:2px 6px; }
+  .seclabel { font-size:12px; color:var(--dim); }
+  h4.sec { margin:6px 0 10px; font-size:13px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+
+  .modal { position:fixed; inset:0; z-index:80; display:none; align-items:center; justify-content:center; padding:20px; }
+  .modal.show { display:flex; }
+  .modal .box { background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:22px; width:min(520px,96vw);
+                box-shadow:var(--shadow); animation:pop .18s; }
+  @keyframes pop { from{ transform:scale(.94); opacity:0;} to{ transform:none; opacity:1;} }
+  .modal .q { font-size:15px; font-weight:600; margin-bottom:14px; display:flex; gap:8px; }
+  .modal .opts { display:flex; flex-direction:column; gap:9px; }
+  .modal .opt { text-align:left; padding:11px 14px; border-radius:10px; border:1px solid var(--border); background:var(--panel2);
+                cursor:pointer; transition:.12s; font-size:13.5px; }
+  .modal .opt:hover { border-color:var(--accent); background:var(--accent-soft); transform:translateX(2px); }
+  .modal .free { margin-top:12px; display:flex; gap:8px; } .modal .free input { flex:1; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand"><span class="dot"></span>飞书文档工作台</span>
+  <div class="tabs">
+    <button id="tabCreate" class="on" onclick="switchMode('create')">✍️ 创作新文档</button>
+    <button id="tabEdit" onclick="switchMode('edit')">💬 对话改稿</button>
+  </div>
+  <span class="sp"></span>
+  <div class="chip" id="modelChip">读取中…</div>
+  <button class="ghost" onclick="openDrawer()">⚙️ 配置 Bot</button>
+</header>
+
+<main>
+  <!-- ========== 模式 A:创作新文档 ========== -->
+  <section id="createView" class="view on">
+    <div class="bar">
+      <div class="field"><label>飞书 Bot</label><select id="botSel"></select></div>
+      <div class="field" style="flex:1; min-width:260px;"><label>优化要求(可选)</label>
+        <input id="instruction" placeholder="例:更正式的语气 / 补一段背景 / 精简重复"></div>
+      <button class="primary" id="optBtn" onclick="optimize()">✨ 用模型优化</button>
+    </div>
+    <div id="msg" class="msg"></div>
+    <div class="cols">
+      <div class="pane">
+        <h3>原始 Markdown <span class="dim" id="srcLen"></span></h3>
+        <textarea class="editor" id="src" placeholder="在此粘贴 / 编写 Markdown…支持 # 标题、表格、- 列表、&gt; 引用"></textarea>
+      </div>
+      <div class="pane">
+        <h3>优化后(可编辑) <span class="dim" id="outLen"></span></h3>
+        <textarea class="editor" id="out" placeholder="点「用模型优化」后出现结果;也可直接手改。发布用的是这一栏。"></textarea>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field"><label>写入目标</label>
+        <select id="destMode" onchange="onDestMode()">
+          <option value="new">新建文档</option>
+          <option value="doc">写入已有文档 / wiki</option>
+        </select></div>
+      <div class="field" id="titleField" style="flex:1; min-width:240px;"><label>文档标题</label>
+        <input id="title" placeholder="新文档标题"></div>
+      <div class="field" id="targetField" style="flex:1; min-width:240px; display:none;"><label>文档链接(docx 或 wiki 均可)</label>
+        <input id="target" placeholder="粘贴飞书文档链接"></div>
+      <label class="dim" style="display:flex; align-items:center; gap:6px;">
+        <input type="checkbox" id="replace"> 写入前清空原内容</label>
+      <button class="primary" id="pubBtn" onclick="publish()">🚀 写入飞书</button>
+    </div>
+  </section>
+
+  <!-- ========== 模式 B:对话改稿 ========== -->
+  <section id="editView" class="view">
+    <div class="bar">
+      <div class="field"><label>飞书 Bot</label><select id="botSel2"></select></div>
+      <div class="field" style="flex:1; min-width:320px;"><label>文档链接(docx 或 wiki)</label>
+        <input id="docLink" placeholder="粘贴要修改的飞书文档链接"></div>
+      <button class="primary" id="loadBtn" onclick="loadDoc()">📥 载入文档</button>
+      <a id="openDoc" class="chip" style="display:none; text-decoration:none;" target="_blank">🔗 在飞书打开</a>
+    </div>
+    <div id="msg2" class="msg"></div>
+    <div class="cols">
+      <div class="pane">
+        <h3><span id="docTitle">文档预览</span> <span class="sp" style="margin-left:auto"></span>
+          <button id="toggleView" class="ghost" style="display:none; padding:2px 10px; font-size:12px" onclick="toggleProposed()">看改后</button></h3>
+        <div class="docview" id="docView"><div class="empty-doc">← 先在上方粘链接、点「载入文档」<br>把要改的文档读进来</div></div>
+      </div>
+      <div class="pane">
+        <h3>💬 和模型说要怎么改</h3>
+        <div class="chat" id="chat"></div>
+        <div class="chatbox">
+          <textarea id="chatIn" placeholder="载入文档后,在这说需求。例:第二段太啰嗦,精简一半" onkeydown="chatKey(event)" disabled></textarea>
+          <button class="primary" id="sendBtn" onclick="sendChat()" disabled>发送</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- 澄清弹窗 -->
+<div class="modal" id="clarify">
+  <div class="box">
+    <div class="q">🤔 <span id="clarifyQ"></span></div>
+    <div class="opts" id="clarifyOpts"></div>
+    <div class="free">
+      <input id="clarifyFree" placeholder="或直接输入你的回答…" onkeydown="if(event.key==='Enter')chooseClarify(this.value)">
+      <button onclick="chooseClarify(document.getElementById('clarifyFree').value)">回答</button>
+    </div>
+  </div>
+</div>
+
+<!-- 配置抽屉 -->
+<div class="mask" id="mask" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer">
+  <div class="hd"><h2>配置</h2><span class="sp" style="margin-left:auto"></span>
+    <button class="ghost" onclick="closeDrawer()">关闭 ✕</button></div>
+  <div class="body">
+    <p class="dim" style="margin:0 0 16px; line-height:1.6">
+      优化模型跟随 <b>cc switch</b> 当前切到的 provider(读 <code>~/.claude/settings.json</code>),无需在此配置——换模型直接用 cc switch 切。
+    </p>
+    <h4 class="sec">飞书 Bot <button class="ghost" style="float:right; padding:2px 8px" onclick="addBot()">+ 加 Bot</button></h4>
+    <div id="botCards"></div>
+    <div id="cfgMsg" class="msg" style="margin-top:8px"></div>
+    <div style="display:flex; gap:10px; margin-top:14px;">
+      <button class="primary" onclick="saveConfig()">保存配置</button>
+      <span class="dim" style="align-self:center">密钥留空 = 沿用已存的;仅存本机</span>
+    </div>
+  </div>
+</div>
+
+<script>
+let CFG = { bots: [], model: {} };
+const $ = (id) => document.getElementById(id);
+const uid = () => 'x' + Math.random().toString(36).slice(2, 9);
+const esc = (s) => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const escAttr = (s) => (s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+
+function msg(el, text, kind){ el.className = 'msg show ' + (kind||''); el.innerHTML = text; }
+function hide(el){ el.className = 'msg'; }
+async function jget(u){ const r = await fetch(u); if(!r.ok) throw new Error((await r.json()).error||r.status); return r.json(); }
+async function jpost(u, body){
+  const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status); return d;
+}
+
+/* ---- 模式切换 ---- */
+function switchMode(m){
+  $('tabCreate').classList.toggle('on', m==='create');
+  $('tabEdit').classList.toggle('on', m==='edit');
+  $('createView').classList.toggle('on', m==='create');
+  $('editView').classList.toggle('on', m==='edit');
+}
+
+/* ---- 配置 ---- */
+async function loadConfig(){ CFG = await jget('/api/config'); renderSelectors(); renderCards(); }
+function renderSelectors(){
+  const m = CFG.model||{};
+  const chip = $('modelChip');
+  if(m.ready){ chip.className='chip'; chip.innerHTML=`🧠 ${esc(m.model)}`; chip.title=m.baseUrl; }
+  else { chip.className='chip off'; chip.textContent='未读到 cc switch 模型'; }
+  const opts = CFG.bots.map(b=>`<option value="${b.id}">${esc(b.name||b.appId)} · ${b.identity==='user'?'用户':'应用'}</option>`).join('')
+             || '<option value="">(先在配置里加 Bot)</option>';
+  $('botSel').innerHTML = opts; $('botSel2').innerHTML = opts;
+}
+function openDrawer(){ renderCards(); $('mask').classList.add('show'); $('drawer').classList.add('show'); }
+function closeDrawer(){ $('mask').classList.remove('show'); $('drawer').classList.remove('show'); }
+function renderCards(){
+  $('botCards').innerHTML = CFG.bots.map((b,i)=>`
+    <div class="card" data-bi="${i}">
+      <div class="grid">
+        <span class="seclabel">名称</span><input data-k="name" value="${escAttr(b.name)}" placeholder="主租户 bot">
+        <span class="seclabel">App ID</span><input data-k="appId" value="${escAttr(b.appId)}" placeholder="cli_xxx">
+        <span class="seclabel">App Secret</span><input data-k="appSecret" type="password" placeholder="${b.hasSecret?'已保存(留空沿用)':'必填'}">
+        <span class="seclabel">写入身份</span>
+        <select data-k="identity">
+          <option value="tenant" ${b.identity!=='user'?'selected':''}>应用身份(文档归 bot,免授权)</option>
+          <option value="user" ${b.identity==='user'?'selected':''}>用户身份(文档归你,需先授权)</option>
+        </select>
+        <span class="seclabel">用户 token 文件</span><input data-k="userTokenFile" value="${escAttr(b.userTokenFile)}" placeholder="~/.feishu_user_token.json(用户身份时)">
+      </div>
+      <div style="text-align:right; margin-top:6px"><button class="del" onclick="delBot(${i})">删除</button></div>
+    </div>`).join('');
+}
+function addBot(){ CFG.bots.push({id:uid(),name:'',appId:'',appSecret:'',identity:'tenant',userTokenFile:'',hasSecret:false}); renderCards(); }
+function delBot(i){ CFG.bots.splice(i,1); renderCards(); }
+function collectCards(){
+  const bots = [...$('botCards').querySelectorAll('.card')].map(card=>{
+    const i=+card.dataset.bi; const o={id:CFG.bots[i].id};
+    card.querySelectorAll('[data-k]').forEach(el=>o[el.dataset.k]=el.value.trim());
+    return o;
+  });
+  return {bots};
+}
+async function saveConfig(){
+  try { CFG = await jpost('/api/config', collectCards()); renderSelectors(); renderCards();
+    msg($('cfgMsg'),'✅ 已保存','ok'); setTimeout(()=>hide($('cfgMsg')),1500);
+  } catch(e){ msg($('cfgMsg'),'保存失败:'+e.message,'err'); }
+}
+
+/* ================= 模式 A:创作 ================= */
+async function optimize(){
+  const s = $('src').value.trim();
+  if(!s){ msg($('msg'),'先在左侧粘贴 Markdown','err'); return; }
+  if(!(CFG.model&&CFG.model.ready)){ msg($('msg'),'没读到 cc switch 的模型,先切好 provider 再刷新','err'); return; }
+  const btn=$('optBtn'), old=btn.textContent; btn.disabled=true; btn.innerHTML='<span class="spin"></span> 优化中…';
+  msg($('msg'),'<span class="spin"></span> 模型处理中,长文可能要几十秒…','ok');
+  try {
+    const d = await jpost('/api/optimize',{markdown:s, instruction:$('instruction').value});
+    $('out').value=d.markdown; updateLens(); msg($('msg'),'✅ 优化完成,可在右栏继续手改后发布','ok');
+  } catch(e){ msg($('msg'),'优化失败:'+e.message,'err'); } finally { btn.disabled=false; btn.textContent=old; }
+}
+function onDestMode(){
+  const mode=$('destMode').value;
+  $('titleField').style.display = mode==='new'?'':'none';
+  $('targetField').style.display = mode==='new'?'none':'';
+}
+async function publish(){
+  const markdown = ($('out').value.trim()||$('src').value.trim());
+  if(!markdown){ msg($('msg'),'没有可写入的内容','err'); return; }
+  const botId=$('botSel').value; if(!botId){ msg($('msg'),'先配置并选择飞书 Bot','err'); openDrawer(); return; }
+  const mode=$('destMode').value; const dest={mode};
+  if(mode==='new') dest.title=$('title').value.trim()||'未命名文档';
+  else { dest.target=$('target').value.trim(); if(!dest.target){ msg($('msg'),'填写目标文档链接','err'); return; } }
+  const btn=$('pubBtn'), old=btn.textContent; btn.disabled=true; btn.innerHTML='<span class="spin"></span> 写入中…';
+  msg($('msg'),'<span class="spin"></span> 写入飞书中…','ok');
+  try {
+    const d = await jpost('/api/publish',{botId,dest,markdown,replace:$('replace').checked});
+    msg($('msg'),`✅ 写入完成(块 ${d.stats.blocks} / 表 ${d.stats.tables} / 引用 ${d.stats.quotes})　→　<a href="${d.url}" target="_blank">打开文档 🔗</a>`,'ok');
+  } catch(e){ msg($('msg'),'写入失败:'+e.message,'err'); } finally { btn.disabled=false; btn.textContent=old; }
+}
+function updateLens(){
+  $('srcLen').textContent = $('src').value ? $('src').value.length+' 字' : '';
+  $('outLen').textContent = $('out').value ? $('out').value.length+' 字' : '';
+}
+$('src').addEventListener('input',updateLens); $('out').addEventListener('input',updateLens);
+
+/* ================= 模式 B:对话改稿 ================= */
+let ED = { docId:null, url:null, cur:'', proposed:null, showing:'cur', history:[] };
+
+async function loadDoc(){
+  const botId=$('botSel2').value; if(!botId){ msg($('msg2'),'先配置并选择飞书 Bot','err'); openDrawer(); return; }
+  const link=$('docLink').value.trim(); if(!link){ msg($('msg2'),'先粘贴文档链接','err'); return; }
+  const btn=$('loadBtn'), old=btn.textContent; btn.disabled=true; btn.innerHTML='<span class="spin"></span> 载入中…';
+  msg($('msg2'),'<span class="spin"></span> 读取并解析文档全文…','ok');
+  try {
+    const d = await jpost('/api/doc/load',{botId,link});
+    ED = { docId:d.docId, url:d.url, cur:d.markdown||'', proposed:null, showing:'cur', history:[], botId };
+    $('docTitle').textContent = d.title || '文档预览';
+    $('openDoc').href = d.url; $('openDoc').style.display='';
+    renderDoc(); $('chat').innerHTML='';
+    addBot_bubble(d.empty ? '这篇文档是空的。告诉我你想写什么,我来起草。' : '已读完全文。想怎么改?直接说需求就行,拿不准的我会先问你。');
+    $('chatIn').disabled=false; $('sendBtn').disabled=false; $('chatIn').focus();
+    hide($('msg2'));
+  } catch(e){ msg($('msg2'),'载入失败:'+e.message,'err'); } finally { btn.disabled=false; btn.textContent=old; }
+}
+
+function renderDoc(){
+  const md = ED.showing==='proposed' && ED.proposed!=null ? ED.proposed : ED.cur;
+  const view=$('docView');
+  view.className = 'docview' + (ED.showing==='proposed'?' proposed':'');
+  view.innerHTML = md.trim() ? mdToHtml(md) : '<div class="empty-doc">(空文档)</div>';
+  $('toggleView').style.display = ED.proposed!=null ? '' : 'none';
+  $('toggleView').textContent = ED.showing==='proposed' ? '看当前' : '看改后';
+}
+function toggleProposed(){ ED.showing = ED.showing==='proposed'?'cur':'proposed'; renderDoc(); }
+
+function addBubble(text, who){
+  const b=document.createElement('div'); b.className='bubble '+who; b.textContent=text;
+  $('chat').appendChild(b); $('chat').scrollTop=$('chat').scrollHeight; return b;
+}
+function addBot_bubble(t){ return addBubble(t,'bot'); }
+
+function chatKey(e){ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendChat(); } }
+
+async function sendChat(text){
+  const message = (typeof text==='string'?text:$('chatIn').value).trim();
+  if(!message) return;
+  $('chatIn').value='';
+  addBubble(message,'user');
+  ED.history.push({role:'user',content:message});
+  const wait = addBot_bubble('…'); wait.innerHTML='<span class="spin"></span>';
+  $('sendBtn').disabled=true; $('chatIn').disabled=true;
+  try {
+    const env = await jpost('/api/doc/chat',{markdown:ED.cur, history:ED.history.slice(0,-1), message});
+    wait.remove();
+    const reply = env.reply || '(无说明)';
+    addBot_bubble(reply);
+    ED.history.push({role:'assistant',content:reply});
+    if(env.clarify && env.clarify.question){ showClarify(env.clarify); }
+    if(env.doc_markdown){ ED.proposed=env.doc_markdown; ED.showing='proposed'; renderDoc(); addEditCard(); }
+  } catch(e){ wait.remove(); addBot_bubble('出错了:'+e.message); }
+  finally { $('sendBtn').disabled=false; $('chatIn').disabled=false; $('chatIn').focus(); }
+}
+
+function addEditCard(){
+  const c=document.createElement('div'); c.className='editcard';
+  c.innerHTML = `<div class="hd">📝 已生成修改稿</div>
+    <div class="bd"><span class="dim">左侧已切到「改后」预览,确认无误再写回飞书</span>
+      <button onclick="applyEdit(this)">✅ 应用到飞书</button></div>`;
+  $('chat').appendChild(c); $('chat').scrollTop=$('chat').scrollHeight;
+}
+async function applyEdit(btn){
+  if(ED.proposed==null) return;
+  btn.disabled=true; const old=btn.textContent; btn.innerHTML='<span class="spin"></span> 写入中…';
+  try {
+    const d = await jpost('/api/doc/apply',{botId:ED.botId, docId:ED.docId, markdown:ED.proposed});
+    ED.cur = ED.proposed; ED.proposed=null; ED.showing='cur'; renderDoc();
+    btn.textContent='✅ 已写入';
+    addBot_bubble(`已写回飞书(块 ${d.stats.blocks} / 表 ${d.stats.tables} / 引用 ${d.stats.quotes})。可以继续说下一处要改的。`);
+  } catch(e){ btn.disabled=false; btn.textContent=old; addBot_bubble('写回失败:'+e.message); }
+}
+
+/* 澄清弹窗 */
+function showClarify(c){
+  $('clarifyQ').textContent = c.question;
+  $('clarifyOpts').innerHTML = (c.options||[]).map((o,i)=>`<button class="opt" data-o="${i}">${esc(o)}</button>`).join('');
+  $('clarifyOpts').querySelectorAll('.opt').forEach((b,i)=> b.onclick=()=>chooseClarify(c.options[i]));
+  $('clarifyFree').value='';
+  $('clarify').classList.add('show');
+}
+function chooseClarify(ans){
+  if(!ans || !ans.trim()) return;
+  $('clarify').classList.remove('show');
+  sendChat(ans.trim());
+}
+
+/* 极简 Markdown → HTML(仅用于预览:标题/列表/引用/表格/分割线/加粗/行内码) */
+function mdInline(s){
+  return esc(s).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/`(.+?)`/g,'<code>$1</code>');
+}
+function mdToHtml(md){
+  const lines = md.split('\n'); let html=''; let i=0;
+  const flushList=(tag,items)=> items.length ? `<${tag}>`+items.map(x=>`<li>${mdInline(x)}</li>`).join('')+`</${tag}>` : '';
+  while(i<lines.length){
+    let ln = lines[i];
+    const s = ln.trim();
+    if(!s){ i++; continue; }
+    let m;
+    if(/^-{3,}$/.test(s)){ html+='<hr>'; i++; continue; }
+    if(m = s.match(/^(#{1,4})\s+(.*)/)){ const l=m[1].length; html+=`<h${l}>${mdInline(m[2])}</h${l}>`; i++; continue; }
+    if(s.startsWith('>')){ const buf=[]; while(i<lines.length && lines[i].trim().startsWith('>')){ buf.push(lines[i].trim().replace(/^>\s?/,'')); i++; } html+=`<blockquote>${mdInline(buf.join(' '))}</blockquote>`; continue; }
+    if(s.startsWith('|') && i+1<lines.length && /^\s*\|?[\s:|-]+\|/.test(lines[i+1])){
+      const rows=[]; while(i<lines.length && lines[i].trim().startsWith('|')){ rows.push(lines[i].trim()); i++; }
+      const cells = rows.map(r=>r.replace(/^\||\|$/g,'').split('|').map(c=>c.trim()));
+      const head=cells[0]; const body=cells.slice(2);
+      html+='<table><thead><tr>'+head.map(c=>`<th>${mdInline(c)}</th>`).join('')+'</tr></thead><tbody>'
+          + body.map(r=>'<tr>'+r.map(c=>`<td>${mdInline(c)}</td>`).join('')+'</tr>').join('')+'</tbody></table>';
+      continue;
+    }
+    if(/^[-*]\s+/.test(s)){ const items=[]; while(i<lines.length && /^[-*]\s+/.test(lines[i].trim())){ items.push(lines[i].trim().replace(/^[-*]\s+/,'')); i++; } html+=flushList('ul',items); continue; }
+    if(/^\d+\.\s+/.test(s)){ const items=[]; while(i<lines.length && /^\d+\.\s+/.test(lines[i].trim())){ items.push(lines[i].trim().replace(/^\d+\.\s+/,'')); i++; } html+=flushList('ol',items); continue; }
+    html+=`<p>${mdInline(s)}</p>`; i++;
+  }
+  return html;
+}
+
+loadConfig();
+</script>
+</body>
+</html>
