@@ -312,6 +312,13 @@ def strip_fence(text):
             return "\n".join(lines[1:-1]).strip()
     return t
 
+def guard_against_envelope(markdown):
+    """最后一道防线:别把模型没解析开的原始 JSON 信封写进飞书。"""
+    head = (markdown or "").strip()[:2000]
+    if head.startswith("{") and '"doc_markdown"' in head:
+        raise RuntimeError("待写入内容像是模型的原始 JSON 信封(没解析开),已拦住。"
+                           "请重发一次需求重新生成改稿。")
+
 # ---- 发布:创建/定位文档 → 写入 --------------------------------------------
 def resolve_link(target, tok):
     """把用户粘的链接/ID 解析成 docx document_id(wiki 链接先解析)。"""
@@ -332,6 +339,7 @@ def preflight(doc, tok):
     return (chk.get("data") or {}).get("document", {}).get("title", "")
 
 def publish(bot, dest, markdown, replace):
+    guard_against_envelope(markdown)
     tok = bot_token(bot)
     mode = dest.get("mode", "new")
     if mode == "new":
@@ -456,18 +464,39 @@ EDIT_SYSTEM = (
     "代码块围栏必须用三个反引号 ```(第一行 ```语言名),严禁用单个或两个反引号当围栏。"
     "保持与原文一致的技术事实,不要杜撰。")
 
+def _unescape_json_string(s):
+    try:
+        return json.loads('"' + s + '"')
+    except Exception:
+        pass
+    out = s
+    for a, b in (("\\n", "\n"), ("\\t", "\t"), ('\\"', '"'), ("\\\\", "\\")):
+        out = out.replace(a, b)
+    return re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), out)
+
 def parse_envelope(text):
     import re
     t = strip_fence(text).strip()
-    try:
-        return json.loads(t)
-    except Exception:
+    if t.startswith("{"):
+        try:
+            return json.loads(t)
+        except Exception:
+            pass
         m = re.search(r"\{.*\}", t, re.S)
         if m:
             try:
                 return json.loads(m.group(0))
             except Exception:
                 pass
+        # JSON 信封被输出上限截断:抢救 doc_markdown 字段里的正文
+        m2 = re.search(r'"doc_markdown"\s*:\s*"(.*?)"\s*[,}\n]', t, re.S) \
+            or re.search(r'"doc_markdown"\s*:\s*"(.*)\Z', t, re.S)
+        if m2:
+            mr = re.search(r'"reply"\s*:\s*"([^"]*)"', t)
+            return {"reply": (mr.group(1) if mr else "") +
+                    "(模型输出到一半被长度截断,已抢救出改稿,结尾可能不全)",
+                    "clarify": None, "doc_markdown": _unescape_json_string(m2.group(1))}
+        return {"reply": "模型返回的 JSON 无法解析:" + t[:200], "clarify": None, "doc_markdown": None}
     # 兜底:模型没按 JSON 输出,直接吐了整篇文档(长文本)→ 当文档正文用
     if len(t) > 300:
         return {"reply": "(模型直接输出了文档正文,已自动识别)", "clarify": None, "doc_markdown": t}
@@ -481,13 +510,23 @@ def claims_change(reply):
     r = reply or ""
     return any(w in r for w in CLAIM_WORDS)
 
-def edit_with_retry(model, msgs, on_chunk, on_info):
-    """跑一轮;若模型声称改了却没给 doc_markdown,自动追问一轮要全文。"""
+def _collect_edit(model, msgs, on_chunk, max_tokens):
     full = ""
-    for kind, chunk in model_stream(model, EDIT_SYSTEM, msgs):
+    for kind, chunk in model_stream(model, EDIT_SYSTEM, msgs, max_tokens=max_tokens):
         if kind == "text":
             full += chunk
         on_chunk(kind, chunk)
+    return full
+
+def edit_with_retry(model, msgs, on_chunk, on_info):
+    """跑一轮;若模型声称改了却没给 doc_markdown,自动追问一轮要全文。
+    改稿要输出全文,默认 32k 上限;端点嫌大报 max_tokens 错时退回 16k。"""
+    try:
+        full = _collect_edit(model, msgs, on_chunk, 32000)
+    except RuntimeError as e:
+        if "max_tokens" not in str(e):
+            raise
+        full = _collect_edit(model, msgs, on_chunk, 16000)
     env = parse_envelope(full)
     if env.get("doc_markdown") is None and not env.get("clarify") and claims_change(env.get("reply", "")):
         on_info("模型声称改了但没给改后全文,自动追问一次…")
@@ -495,11 +534,12 @@ def edit_with_retry(model, msgs, on_chunk, on_info):
             {"role": "assistant", "content": full},
             {"role": "user", "content": "你上一轮的回复缺少改后的完整文档。请重新输出 JSON,"
                                         "务必在 doc_markdown 字段给出修改后的完整 Markdown 全文。"}]
-        full2 = ""
-        for kind, chunk in model_stream(model, EDIT_SYSTEM, retry_msgs):
-            if kind == "text":
-                full2 += chunk
-            on_chunk(kind, chunk)
+        try:
+            full2 = _collect_edit(model, retry_msgs, on_chunk, 32000)
+        except RuntimeError as e:
+            if "max_tokens" not in str(e):
+                raise
+            full2 = _collect_edit(model, retry_msgs, on_chunk, 16000)
         env2 = parse_envelope(full2)
         if env2.get("doc_markdown"):
             env = env2
@@ -650,6 +690,7 @@ class Handler(BaseHTTPRequestHandler):
                 bot = next((b for b in cfg["bots"] if b["id"] == d["botId"]), None)
                 if not bot:
                     return self._send(400, {"error": "bot 不存在"})
+                guard_against_envelope(d["markdown"])
                 tok = bot_token(bot)
                 doc = d["docId"]
                 MD.clear_doc(doc, tok)
