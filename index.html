@@ -489,6 +489,7 @@ async function sendChat(text){
       (f)=>{
         if(f.kind==='thinking'){ think+=f.text; tail.textContent='💭 '+think.slice(-300); }
         else if(f.kind==='text'){ nchars+=f.text.length; if(!think) tail.textContent='正在生成… '+nchars+' 字'; }
+        else if(f.kind==='info'){ tail.textContent='↻ '+f.text; }
         else if(f.kind==='done'){ env=f.env; }
         else if(f.kind==='error'){ err=f.error; }
       });

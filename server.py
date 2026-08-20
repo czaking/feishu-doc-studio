@@ -448,7 +448,8 @@ EDIT_SYSTEM = (
     '- "reply": 字符串,给用户看的简短中文说明(你做了什么,或你的疑问)。\n'
     '- "clarify": 需要用户确认时填 {"question": "问题", "options": ["选项A", "选项B"]},否则为 null。\n'
     "  当需求有歧义、有多种合理改法、或可能删除/大改重要内容时,务必先 clarify,不要擅自动手。\n"
-    '- "doc_markdown": 修改后的【完整】Markdown 全文(不是片段);若这轮只是提问或无改动则为 null。\n'
+    '- "doc_markdown": 修改后的【完整】Markdown 全文(不是片段);仅当这轮只是提问或确实无改动时才允许为 null。\n'
+    '重要:只要做了任何改动,就必须在 doc_markdown 里给出完整改后文档;严禁只在 reply 里说改了而不输出 doc_markdown。\n'
     "只用飞书支持的语法:# ## ### #### 标题、段落、**加粗**、`行内代码`、- 无序列表、1. 有序列表、"
     "> 引用、表格、--- 分割线、``` 代码块(保留语言标签)。\n"
     "处理代码块务必保持 ``` 围栏成对完整,除需求涉及的改动外代码内容逐字保留,不要把代码拆成普通段落。"
@@ -467,7 +468,44 @@ def parse_envelope(text):
                 return json.loads(m.group(0))
             except Exception:
                 pass
+    # 兜底:模型没按 JSON 输出,直接吐了整篇文档(长文本)→ 当文档正文用
+    if len(t) > 300:
+        return {"reply": "(模型直接输出了文档正文,已自动识别)", "clarify": None, "doc_markdown": t}
     return {"reply": t, "clarify": None, "doc_markdown": None}
+
+CLAIM_WORDS = ("添加", "修改", "删除", "调整", "优化", "重写", "补充", "替换", "加入",
+               "改为", "改成", "加上", "增加", "更新", "移至", "拆分", "合并", "精简",
+               "扩写", "改写", "插入", "移除", "移到", "放在")
+
+def claims_change(reply):
+    r = reply or ""
+    return any(w in r for w in CLAIM_WORDS)
+
+def edit_with_retry(model, msgs, on_chunk, on_info):
+    """跑一轮;若模型声称改了却没给 doc_markdown,自动追问一轮要全文。"""
+    full = ""
+    for kind, chunk in model_stream(model, EDIT_SYSTEM, msgs):
+        if kind == "text":
+            full += chunk
+        on_chunk(kind, chunk)
+    env = parse_envelope(full)
+    if env.get("doc_markdown") is None and not env.get("clarify") and claims_change(env.get("reply", "")):
+        on_info("模型声称改了但没给改后全文,自动追问一次…")
+        retry_msgs = msgs + [
+            {"role": "assistant", "content": full},
+            {"role": "user", "content": "你上一轮的回复缺少改后的完整文档。请重新输出 JSON,"
+                                        "务必在 doc_markdown 字段给出修改后的完整 Markdown 全文。"}]
+        full2 = ""
+        for kind, chunk in model_stream(model, EDIT_SYSTEM, retry_msgs):
+            if kind == "text":
+                full2 += chunk
+            on_chunk(kind, chunk)
+        env2 = parse_envelope(full2)
+        if env2.get("doc_markdown"):
+            env = env2
+        elif env2.get("reply"):
+            env["reply"] = (env.get("reply") or "") + "\n" + env2["reply"]
+    return env
 
 def build_edit_messages(doc_markdown, history, message):
     msgs = []
@@ -482,8 +520,8 @@ def build_edit_messages(doc_markdown, history, message):
 
 def doc_chat(doc_markdown, history, message, model_name=None, provider_name=None):
     model = active_model(model_name, provider_name)
-    out = anthropic_chat(model, EDIT_SYSTEM, build_edit_messages(doc_markdown, history, message))
-    return parse_envelope(out)
+    msgs = build_edit_messages(doc_markdown, history, message)
+    return edit_with_retry(model, msgs, on_chunk=lambda k, c: None, on_info=lambda t: None)
 
 # ---- HTTP ------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
@@ -576,13 +614,11 @@ class Handler(BaseHTTPRequestHandler):
                 model = active_model(d.get("model"), d.get("provider"))
                 msgs = build_edit_messages(d.get("markdown", ""), d.get("history", []), d["message"])
                 self._sse_start()
-                full = ""
                 try:
-                    for kind, chunk in model_stream(model, EDIT_SYSTEM, msgs):
-                        if kind == "text":
-                            full += chunk
-                        self._sse({"kind": kind, "text": chunk})
-                    self._sse({"kind": "done", "env": parse_envelope(full)})
+                    env = edit_with_retry(model, msgs,
+                                          on_chunk=lambda k, c: self._sse({"kind": k, "text": c}),
+                                          on_info=lambda t: self._sse({"kind": "info", "text": t}))
+                    self._sse({"kind": "done", "env": env})
                 except Exception as e:
                     traceback.print_exc()
                     self._sse({"kind": "error", "error": str(e)})
