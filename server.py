@@ -7,7 +7,7 @@
 
 零第三方依赖,只用标准库。仅监听 127.0.0.1(本机个人工具)。
 """
-import os, sys, json, time, threading, traceback, importlib.util, urllib.request, urllib.error
+import os, re, sys, json, time, threading, traceback, importlib.util, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,34 +46,97 @@ def save_config(cfg):
         os.replace(tmp, CONFIG_PATH)
 
 def public_config(cfg):
-    """给前端的视图:抹掉密钥明文,只暴露 hasSecret 标记;附带当前生效的模型(只读)。"""
+    """给前端的视图:抹掉密钥明文,只暴露 hasSecret 标记;附带当前生效的模型与候选列表。"""
     def bot(b):
         return {"id": b["id"], "name": b.get("name", ""), "appId": b.get("appId", ""),
                 "identity": b.get("identity", "tenant"),
                 "userTokenFile": b.get("userTokenFile", ""),
                 "hasSecret": bool(b.get("appSecret"))}
     m = active_model()
+    cands = []
+    env = claude_env()
+    seen_cur = set()
+    for k in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+              "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"):
+        v = env.get(k) or os.environ.get(k, "")
+        if v and v not in seen_cur:
+            seen_cur.add(v)
+            cands.append({"model": v, "provider": ""})  # provider 空 = 跟随当前
+    for p in cc_providers():
+        for mm in p["models"]:
+            cands.append({"model": mm, "provider": p["name"]})
     return {"bots": [bot(b) for b in cfg.get("bots", [])],
             "model": {"model": m["model"], "baseUrl": m["baseUrl"],
-                      "ready": bool(m["token"])}}
+                      "ready": bool(m["token"]), "candidates": cands}}
 
 # ---- 当前模型:直接复用 cc switch 写进 ~/.claude/settings.json 的 provider ------
-def active_model():
-    """读 cc switch 当前切到的 Anthropic 端点(settings.json 的 env 块,回退到进程环境变量)。
-    用户在 cc switch 里切哪个,这里就用哪个,无需在本工具重复配置。"""
-    env = {}
+def claude_env():
     try:
         with open(CLAUDE_SETTINGS, encoding="utf-8") as f:
-            env = json.load(f).get("env", {})
+            return json.load(f).get("env", {})
     except Exception:
-        pass
+        return {}
+
+CC_DB = os.path.expanduser("~/.cc-switch/cc-switch.db")
+
+def cc_providers():
+    """读 cc switch 数据库里全部 Claude provider(端点 + 凭据 + 模型清单),只读。
+    页面上的模型下拉就是从这里来的:选哪个模型,就用那个 provider 的端点和密钥。
+    按最近一次成功调用时间排序,健康的 provider 排前面。"""
+    import sqlite3
+    try:
+        db = sqlite3.connect("file:" + CC_DB + "?mode=ro", uri=True)
+        rows = db.execute("SELECT id, name, settings_config FROM providers "
+                          "WHERE app_type='claude' ORDER BY sort_index").fetchall()
+        health = {pid: (ls or "") for pid, ls in db.execute(
+            "SELECT provider_id, last_success_at FROM provider_health WHERE app_type='claude'")}
+        db.close()
+    except Exception:
+        return []
+    out = []
+    for pid, name, cfg in rows:
+        try:
+            env = (json.loads(cfg) or {}).get("env", {})
+        except Exception:
+            continue
+        base = env.get("ANTHROPIC_BASE_URL", "")
+        tok = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY", "")
+        if not base or not tok:
+            continue
+        models = []
+        for k in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                  "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL"):
+            v = env.get(k)
+            if v and v not in models:
+                models.append(v)
+        if models:
+            out.append({"name": name, "baseUrl": base, "token": tok,
+                        "authKind": "bearer" if env.get("ANTHROPIC_AUTH_TOKEN") else "apikey",
+                        "models": models, "lastOk": health.get(pid, "")})
+    out.sort(key=lambda p: p["lastOk"], reverse=True)
+    return out
+
+def active_model(model_override=None, provider_name=None):
+    """默认跟随 cc switch 当前 provider(settings.json);
+    页面上选了具体模型(+provider)时,用那个 provider 的端点和密钥。"""
+    override = (model_override or "").strip()
+    if override:
+        for p in cc_providers():
+            if override in p["models"] and (not provider_name or p["name"] == provider_name):
+                return {"baseUrl": p["baseUrl"], "token": p["token"],
+                        "model": override, "authKind": p["authKind"]}
+        for p in cc_providers():  # 指定 provider 没命中时退回任意拥有该模型的
+            if override in p["models"]:
+                return {"baseUrl": p["baseUrl"], "token": p["token"],
+                        "model": override, "authKind": p["authKind"]}
+    env = claude_env()
     def pick(k):
         return env.get(k) or os.environ.get(k, "")
     token = pick("ANTHROPIC_AUTH_TOKEN") or pick("ANTHROPIC_API_KEY")
     return {
         "baseUrl": pick("ANTHROPIC_BASE_URL") or "https://api.anthropic.com",
         "token": token,
-        "model": pick("ANTHROPIC_MODEL") or "claude-opus-4-8",
+        "model": override or pick("ANTHROPIC_MODEL") or "claude-opus-4-8",
         "authKind": "bearer" if pick("ANTHROPIC_AUTH_TOKEN") else "apikey",
     }
 
@@ -107,25 +170,60 @@ def bot_token(bot):
         return user_token(bot)
     return tenant_token(bot["appId"], bot["appSecret"])
 
-# ---- 调用模型(Anthropic Messages,复用 cc switch 的端点) -------------------
+# ---- 调用模型(复用 cc switch 的端点;Anthropic 优先,404 时回退 OpenAI 兼容) ----
+def clean_model(name):
+    """cc switch 用「模型名[1M]」标注上下文窗口等变体,API 不认这个后缀,发请求前去掉。"""
+    return re.sub(r"\s*\[[^\]]*\]\s*$", "", (name or "")).strip()
+
+def model_url(base, kind):
+    """拼请求路径:有的 provider base 自带 /v1(如 callapi8.com/v1),不能再叠一层。"""
+    b = (base or "").rstrip("/")
+    suffix = "/messages" if kind == "anthropic" else "/chat/completions"
+    if b.endswith("/v1"):
+        return b + suffix
+    return b + ("/v1" if kind == "anthropic" else "/v1") + suffix
+
+def _post_json(url, headers, body_dict):
+    # 带上正常浏览器 UA:部分中转端点挂在 Cloudflare 后面,会拦 Python 默认 UA(1010)
+    headers.setdefault("User-Agent",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+    req = urllib.request.Request(url, data=json.dumps(body_dict).encode(),
+                                 headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        return json.load(resp)
+
+def openai_chat(m, system, messages, max_tokens=16000):
+    """OpenAI 兼容格式(/v1/chat/completions):部分中转端点只有这个协议。"""
+    url = model_url(m["baseUrl"], "openai")
+    headers = {"Content-Type": "application/json"}
+    if m["token"]:
+        headers["Authorization"] = "Bearer " + m["token"]
+    r = _post_json(url, headers, {"model": clean_model(m["model"]), "max_tokens": max_tokens,
+                                  "messages": [{"role": "system", "content": system}] + messages})
+    return r["choices"][0]["message"]["content"]
+
 def anthropic_chat(m, system, messages, max_tokens=16000):
-    """通用多轮调用。messages = [{"role":"user"/"assistant","content":str}, ...]"""
+    """通用多轮调用。messages = [{"role":"user"/"assistant","content":str}, ...]
+    端点不支持 /v1/messages(404/405)时自动改走 OpenAI 兼容协议。"""
     if not m["token"]:
         raise RuntimeError("没读到模型凭据。请确认 cc switch 已切好 provider(会写入 ~/.claude/settings.json)。")
-    url = m["baseUrl"].rstrip("/") + "/v1/messages"
-    body = json.dumps({"model": m["model"], "max_tokens": max_tokens,
-                       "system": system, "messages": messages}).encode()
+    url = model_url(m["baseUrl"], "anthropic")
     headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
     if m["authKind"] == "bearer":
         headers["Authorization"] = "Bearer " + m["token"]
     else:
         headers["x-api-key"] = m["token"]
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    body = {"model": clean_model(m["model"]), "max_tokens": max_tokens, "system": system, "messages": messages}
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            r = json.load(resp)
+        r = _post_json(url, headers, body)
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"模型返回 {e.code}: {e.read().decode()[:400]}")
+        detail = e.read().decode()[:400]
+        if e.code in (404, 405):  # 该端点可能是纯 OpenAI 兼容格式
+            try:
+                return openai_chat(m, system, messages, max_tokens)
+            except Exception as e2:
+                raise RuntimeError(f"模型 {m['model']} 两种协议都失败。Anthropic: {e.code} {detail};OpenAI 兼容: {e2}")
+        raise RuntimeError(f"模型 {m['model']} 返回 {e.code}: {detail}")
     except Exception as e:
         raise RuntimeError(f"连不上模型 {url}: {e}")
     return "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
@@ -187,9 +285,15 @@ def publish(bot, dest, markdown, replace):
 
 # ---- 读文档:飞书 blocks → Markdown(反向还原,保住结构再交给模型改) -----------
 HEAD_LVL = {3: 1, 4: 2, 5: 3, 6: 4, 7: 5, 8: 6, 9: 7, 10: 8, 11: 9}
-CONTENT_KEY = {2: "text", 12: "bullet", 13: "ordered",
+CONTENT_KEY = {2: "text", 12: "bullet", 13: "ordered", 14: "code",
                3: "heading1", 4: "heading2", 5: "heading3", 6: "heading4",
                7: "heading5", 8: "heading6", 9: "heading7", 10: "heading8", 11: "heading9"}
+# 飞书代码块语言编号 → 围栏语言名(与 feishu_md2doc.CODE_LANG 对应)
+CODE_LANG_REV = {34: "python", 20: "javascript", 44: "typescript", 21: "json", 3: "bash",
+                 15: "go", 19: "java", 42: "sql", 48: "yaml", 17: "html", 7: "css",
+                 41: "scss", 28: "markdown", 47: "xml", 4: "c", 6: "cpp", 36: "ruby",
+                 37: "rust", 31: "php", 23: "kotlin", 43: "swift", 39: "scala", 35: "r",
+                 26: "lua", 32: "powershell", 5: "csharp"}
 
 def _elems_md(block):
     key = CONTENT_KEY.get(block.get("block_type"))
@@ -234,6 +338,10 @@ def doc_to_markdown(doc, tok):
             lines.append("1. " + _elems_md(b))
         elif bt == 22:
             lines += ["---", ""]
+        elif bt == 14:  # 代码块 → ``` 围栏(带语言标签)
+            lang_id = ((b.get("code") or {}).get("style") or {}).get("language")
+            content = _elems_md(b)
+            lines += ["```" + CODE_LANG_REV.get(lang_id, ""), content.rstrip("\n"), "```", ""]
         elif bt == 19:  # callout → 引用
             for cid in b.get("children", []):
                 c = bmap.get(cid)
@@ -277,7 +385,9 @@ EDIT_SYSTEM = (
     "  当需求有歧义、有多种合理改法、或可能删除/大改重要内容时,务必先 clarify,不要擅自动手。\n"
     '- "doc_markdown": 修改后的【完整】Markdown 全文(不是片段);若这轮只是提问或无改动则为 null。\n'
     "只用飞书支持的语法:# ## ### #### 标题、段落、**加粗**、`行内代码`、- 无序列表、1. 有序列表、"
-    "> 引用、表格、--- 分割线。保持与原文一致的技术事实,不要杜撰。")
+    "> 引用、表格、--- 分割线、``` 代码块(保留语言标签)。\n"
+    "处理代码块务必保持 ``` 围栏成对完整,除需求涉及的改动外代码内容逐字保留,不要把代码拆成普通段落。"
+    "保持与原文一致的技术事实,不要杜撰。")
 
 def parse_envelope(text):
     import re
@@ -293,8 +403,8 @@ def parse_envelope(text):
                 pass
     return {"reply": t, "clarify": None, "doc_markdown": None}
 
-def doc_chat(doc_markdown, history, message):
-    model = active_model()
+def doc_chat(doc_markdown, history, message, model_name=None, provider_name=None):
+    model = active_model(model_name, provider_name)
     msgs = []
     convo = f"【当前文档全文 Markdown】\n{doc_markdown or '(空文档,还没有内容)'}\n"
     msgs.append({"role": "user", "content": convo + "\n请等待我的修改需求。"})
@@ -348,7 +458,7 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/api/optimize":
                 d = self._read_json()
-                model = active_model()
+                model = active_model(d.get("model"), d.get("provider"))
                 instruction = (d.get("instruction") or "").strip()
                 user_msg = (("额外要求:" + instruction + "\n\n") if instruction else "") + \
                            "下面是待优化的 Markdown:\n\n" + d["markdown"]
@@ -379,7 +489,7 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/api/doc/chat":
                 d = self._read_json()
-                env = doc_chat(d.get("markdown", ""), d.get("history", []), d["message"])
+                env = doc_chat(d.get("markdown", ""), d.get("history", []), d["message"], d.get("model"), d.get("provider"))
                 return self._send(200, env)
 
             if self.path == "/api/doc/apply":

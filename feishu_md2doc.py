@@ -79,6 +79,12 @@ def inline(text):
 
 HEAD={1:("heading1",3),2:("heading2",4),3:("heading3",5),4:("heading4",6)}
 
+# 代码块语言编号(飞书 CodeLanguage 枚举,1=PlainText)
+CODE_LANG={"python":34,"javascript":20,"typescript":44,"json":21,"bash":3,"sh":3,"shell":3,
+ "zsh":3,"go":15,"java":19,"sql":42,"yaml":48,"yml":48,"html":17,"css":7,"scss":41,
+ "markdown":28,"xml":47,"c":4,"cpp":6,"ruby":36,"rust":37,"php":31,"kotlin":23,
+ "swift":43,"scala":39,"r":35,"lua":26,"powershell":32,"csharp":5,"cs":5,"ts":44,"js":20,"py":34}
+
 # ---------- markdown -> 操作序列 ----------
 def parse(md):
     lines=md.split("\n"); ops=[]; i=0
@@ -114,6 +120,13 @@ def parse(md):
                 header=cells[0]; body=cells[2:]
                 cells=[header]+body
             ops.append(("table",cells)); continue
+        # 代码块(``` 围栏,保留语言标签与内容原样)
+        if s.startswith("```"):
+            lang=s[3:].strip(); buf=[]; i+=1
+            while i<len(lines) and not lines[i].strip().startswith("```"):
+                buf.append(lines[i]); i+=1
+            i+=1  # 跳过收尾围栏
+            ops.append(("code",(lang,"\n".join(buf)))); continue
         # 有序列表
         m=re.match(r"\d+\.\s+(.*)",s)
         if m:
@@ -134,6 +147,10 @@ def simple_block(op):
         lvl,txt=val; field,bt=HEAD.get(lvl,HEAD[4])
         return {"block_type":bt,field:{"elements":inline(txt)}}
     if kind=="text": return {"block_type":2,"text":{"elements":inline(val)}}
+    if kind=="code":
+        lang,content=val
+        return {"block_type":14,"code":{"elements":[{"text_run":{"content":content}}],
+                "style":{"language":CODE_LANG.get(lang.lower(),1),"wrap":True}}}
     if kind=="bullet": return {"block_type":12,"bullet":{"elements":inline(val)}}
     if kind=="ordered": return {"block_type":13,"ordered":{"elements":inline(val)}}
     return None

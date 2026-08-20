@@ -36,6 +36,25 @@
           border-radius:8px; background:var(--accent-soft); font-size:13px; min-height:35px; }
   .chip.off { background:#ffeef0; color:var(--err); }
   @media (prefers-color-scheme: dark){ .chip.off{ background:#3a1d21; } }
+  .modeldd { position:relative; }
+  .chipbtn { display:inline-flex; align-items:center; gap:7px; padding:7px 12px; border:1px solid var(--border);
+          border-radius:8px; background:var(--accent-soft); font-size:13px; min-height:35px; color:var(--text); }
+  .chipbtn:hover { border-color:var(--accent); }
+  .chipbtn .caret { color:var(--dim); font-size:11px; }
+  .chipbtn.na { background:#ffeef0; color:var(--err); }
+  @media (prefers-color-scheme: dark){ .chipbtn.na{ background:#3a1d21; } }
+  .mnav { position:absolute; top:calc(100% + 6px); right:0; min-width:300px; max-height:400px; overflow:auto;
+          background:var(--panel); border:1px solid var(--border); border-radius:12px; box-shadow:var(--shadow);
+          padding:6px; display:none; z-index:90; }
+  .mnav.show { display:block; animation:fade .12s; }
+  .mnav .mi { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:8px; cursor:pointer; font-size:13px; }
+  .mnav .mi:hover { background:var(--accent-soft); }
+  .mnav .mi.cur { color:var(--accent); font-weight:600; }
+  .mnav .mi .chk { width:14px; color:var(--accent); }
+  .mnav .mi .prov { margin-left:auto; color:var(--dim); font-size:11.5px; white-space:nowrap; }
+  .mnav .custom { color:var(--dim); border-top:1px solid var(--border); margin-top:4px; border-radius:0 0 8px 8px; }
+  .mnav .cin { display:flex; gap:6px; padding:6px; }
+  .mnav .cin input { flex:1; min-width:0; }
 
   button { font-size:14px; cursor:pointer; border-radius:9px; border:1px solid var(--border);
            background:var(--panel); color:var(--text); padding:8px 15px; transition:.15s; }
@@ -87,6 +106,10 @@
   .docview p { margin:.5em 0; } .docview ul,.docview ol { margin:.4em 0; padding-left:1.4em; }
   .docview li { margin:.2em 0; } .docview hr { border:none; border-top:1px solid var(--border); margin:1em 0; }
   .docview blockquote { margin:.6em 0; padding:8px 14px; border-left:3px solid var(--accent); background:var(--accent-soft); border-radius:0 8px 8px 0; }
+  .docview pre { margin:.6em 0; padding:12px 14px; background:var(--panel2); border:1px solid var(--border);
+                 border-radius:9px; overflow:auto; }
+  .docview pre code { background:none; padding:0; font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+                 font-size:12.5px; line-height:1.65; white-space:pre; }
   .docview table { border-collapse:collapse; margin:.6em 0; width:100%; } .docview th,.docview td{ border:1px solid var(--border); padding:6px 10px; text-align:left; }
   .docview th { background:var(--panel2); }
   .empty-doc { color:var(--dim); text-align:center; margin-top:80px; }
@@ -140,7 +163,12 @@
     <button id="tabEdit" onclick="switchMode('edit')">💬 对话改稿</button>
   </div>
   <span class="sp"></span>
-  <div class="chip" id="modelChip">读取中…</div>
+  <div class="modeldd">
+    <button class="chipbtn" id="modelBtn" onclick="toggleModelMenu(event)">
+      <span>🧠</span><span id="modelName">读取中…</span><span class="caret">▾</span>
+    </button>
+    <div class="mnav" id="modelMenu"></div>
+  </div>
   <button class="ghost" onclick="openDrawer()">⚙️ 配置 Bot</button>
 </header>
 
@@ -265,14 +293,49 @@ function switchMode(m){
 /* ---- 配置 ---- */
 async function loadConfig(){ CFG = await jget('/api/config'); renderSelectors(); renderCards(); }
 function renderSelectors(){
-  const m = CFG.model||{};
-  const chip = $('modelChip');
-  if(m.ready){ chip.className='chip'; chip.innerHTML=`🧠 ${esc(m.model)}`; chip.title=m.baseUrl; }
-  else { chip.className='chip off'; chip.textContent='未读到 cc switch 模型'; }
+  renderModelDD();
   const opts = CFG.bots.map(b=>`<option value="${b.id}">${esc(b.name||b.appId)} · ${b.identity==='user'?'用户':'应用'}</option>`).join('')
              || '<option value="">(先在配置里加 Bot)</option>';
   $('botSel').innerHTML = opts; $('botSel2').innerHTML = opts;
 }
+
+/* ---- 模型下拉(仿 cc switch:全量模型,选哪个用哪个的端点) ---- */
+let MODELS=[], SEL_MODEL='', SEL_PROVIDER='';
+function renderModelDD(){
+  const m=CFG.model||{}; MODELS=m.candidates||[];
+  if(!SEL_MODEL) SEL_MODEL=m.model||'';
+  $('modelName').textContent = SEL_MODEL || '(未读到模型)';
+  $('modelBtn').classList.toggle('na', !m.ready && !SEL_MODEL);
+  $('modelBtn').title = m.ready ? `默认端点:${m.baseUrl}` : '未读到 cc switch 的模型凭据';
+  renderModelMenu();
+}
+function renderModelMenu(){
+  $('modelMenu').innerHTML = MODELS.map((c,i)=>{
+    const cur = c.model===SEL_MODEL && (c.provider||'')===SEL_PROVIDER;
+    return `<div class="mi ${cur?'cur':''}" onclick="pickModel(event,${i})">`+
+      `<span class="chk">${cur?'✓':''}</span>${esc(c.model)}`+
+      `<span class="prov">${c.provider?esc(c.provider):'跟随当前'}</span></div>`;
+  }).join('') + `<div class="mi custom" onclick="customModelForm(event)">✏️ 输入其他模型…</div>`;
+}
+function toggleModelMenu(e){ e.stopPropagation(); $('modelMenu').classList.toggle('show'); }
+function pickModel(e,i){ e.stopPropagation();
+  SEL_MODEL=MODELS[i].model; SEL_PROVIDER=MODELS[i].provider||'';
+  $('modelName').textContent=SEL_MODEL; $('modelMenu').classList.remove('show'); renderModelMenu(); }
+function customModelForm(e){
+  e.stopPropagation();
+  $('modelMenu').innerHTML = `<div class="cin"><input id="cmIn" placeholder="模型名,如 claude-sonnet-4-6"
+    onkeydown="if(event.key==='Enter')customModelGo();if(event.key==='Escape')renderModelMenu()">
+    <button onclick="customModelGo()">确定</button></div>`;
+  $('cmIn').focus();
+}
+function customModelGo(){
+  const el=$('cmIn'); const v=el?el.value.trim():'';
+  if(v){ SEL_MODEL=v; SEL_PROVIDER=''; $('modelName').textContent=v; }
+  $('modelMenu').classList.remove('show'); renderModelMenu();
+}
+function selectedModel(){ return SEL_MODEL; }
+function selectedProvider(){ return SEL_PROVIDER; }
+document.addEventListener('click', ()=>{ const m=$('modelMenu'); if(m) m.classList.remove('show'); });
 function openDrawer(){ renderCards(); $('mask').classList.add('show'); $('drawer').classList.add('show'); }
 function closeDrawer(){ $('mask').classList.remove('show'); $('drawer').classList.remove('show'); }
 function renderCards(){
@@ -316,7 +379,7 @@ async function optimize(){
   const btn=$('optBtn'), old=btn.textContent; btn.disabled=true; btn.innerHTML='<span class="spin"></span> 优化中…';
   msg($('msg'),'<span class="spin"></span> 模型处理中,长文可能要几十秒…','ok');
   try {
-    const d = await jpost('/api/optimize',{markdown:s, instruction:$('instruction').value});
+    const d = await jpost('/api/optimize',{markdown:s, instruction:$('instruction').value, model:selectedModel(), provider:selectedProvider()});
     $('out').value=d.markdown; updateLens(); msg($('msg'),'✅ 优化完成,可在右栏继续手改后发布','ok');
   } catch(e){ msg($('msg'),'优化失败:'+e.message,'err'); } finally { btn.disabled=false; btn.textContent=old; }
 }
@@ -392,7 +455,7 @@ async function sendChat(text){
   const wait = addBot_bubble('…'); wait.innerHTML='<span class="spin"></span>';
   $('sendBtn').disabled=true; $('chatIn').disabled=true;
   try {
-    const env = await jpost('/api/doc/chat',{markdown:ED.cur, history:ED.history.slice(0,-1), message});
+    const env = await jpost('/api/doc/chat',{markdown:ED.cur, history:ED.history.slice(0,-1), message, model:selectedModel(), provider:selectedProvider()});
     wait.remove();
     const reply = env.reply || '(无说明)';
     addBot_bubble(reply);
@@ -447,6 +510,12 @@ function mdToHtml(md){
     const s = ln.trim();
     if(!s){ i++; continue; }
     let m;
+    if(s.startsWith('```')){
+      const buf=[]; i++;
+      while(i<lines.length && !lines[i].trim().startsWith('```')){ buf.push(lines[i]); i++; }
+      i++; // 跳过收尾围栏
+      html+=`<pre><code>${esc(buf.join('\n'))}</code></pre>`; continue;
+    }
     if(/^-{3,}$/.test(s)){ html+='<hr>'; i++; continue; }
     if(m = s.match(/^(#{1,4})\s+(.*)/)){ const l=m[1].length; html+=`<h${l}>${mdInline(m[2])}</h${l}>`; i++; continue; }
     if(s.startsWith('>')){ const buf=[]; while(i<lines.length && lines[i].trim().startsWith('>')){ buf.push(lines[i].trim().replace(/^>\s?/,'')); i++; } html+=`<blockquote>${mdInline(buf.join(' '))}</blockquote>`; continue; }
