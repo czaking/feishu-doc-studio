@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""feishu-doc-studio —— 本地 Web 工具:用本地模型优化 Markdown,再一键写入飞书文档。
+"""feishu-doc-studio —— 本地 Web 工具:用模型优化/改写 Markdown,再一键写入飞书文档。
 
 - 多「飞书 Bot」:每个 = 一组 app_id/app_secret + 身份(tenant/user),可写进不同租户。
-- 多「本地模型」:任意 OpenAI 兼容 endpoint(Ollama / vLLM / LM Studio …)。
-- 复用 ~/feishu_md2doc.py 的 Markdown→飞书 block 逻辑(parse/write_md/api,均按 tok 参数化)。
+- 模型:复用 cc switch 的 provider(读 ~/.cc-switch/cc-switch.db),页面上可下拉切换,
+  选哪个模型就自动用那个 provider 的端点与密钥。
+- 复用 feishu_md2doc.py 的 Markdown→飞书 block 逻辑(parse/write_md/api,均按 tok 参数化)。
 
 零第三方依赖,只用标准库。仅监听 127.0.0.1(本机个人工具)。
 """
